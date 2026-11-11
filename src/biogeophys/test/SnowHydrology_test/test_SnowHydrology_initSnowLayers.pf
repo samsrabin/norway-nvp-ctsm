@@ -92,6 +92,70 @@ contains
     call SnowHydrologyClean()
   end function overfill_depth
 
+  function empty_pack_depth() result(depth)
+    ! A snow depth too shallow for InitSnowLayers to lay down any snow layer: below
+    ! dzmin(1), the thinnest a lone layer may be. Half of it rather than zero, so that
+    ! the case is "some snow, too little for a pack" rather than the zero depth the bare
+    ! allocator call below uses.
+    !
+    ! Read from the vertical structure, through the same allocate-then-clean call, for
+    ! the reasons overfill_depth gives; its comment also says what the caller has to
+    ! have set up first.
+    real(r8) :: depth
+    real(r8), allocatable :: no_snow(:)  ! [begc:endc]
+
+    allocate(no_snow(bounds%begc:bounds%endc))
+    no_snow(:) = 0._r8
+    call InitSnowLayers(bounds, no_snow)
+    depth = 0.5_r8 * dzmin(1)
+    call SnowHydrologyClean()
+  end function empty_pack_depth
+
+  function single_layer_depth() result(depth)
+    ! A snow depth InitSnowLayers lays down as a single layer: between dzmin(1) and
+    ! dzmax_l(1), the thinnest a lone layer may be and the thickest it may grow before a
+    ! second is needed. The midpoint of that range sits clear of both edges.
+    !
+    ! Read from the vertical structure, through the same allocate-then-clean call, for
+    ! the reasons overfill_depth gives; its comment also says what the caller has to
+    ! have set up first.
+    real(r8) :: depth
+    real(r8), allocatable :: no_snow(:)  ! [begc:endc]
+
+    allocate(no_snow(bounds%begc:bounds%endc))
+    no_snow(:) = 0._r8
+    call InitSnowLayers(bounds, no_snow)
+    depth = 0.5_r8 * (dzmin(1) + dzmax_l(1))
+    call SnowHydrologyClean()
+  end function single_layer_depth
+
+  function partial_pack_depth() result(depth)
+    ! A snow depth InitSnowLayers lays down as three layers with the bottom two split
+    ! evenly, on a stock column and an NVP one alike.
+    !
+    ! Past sum(dzmax_u(1:2)) the layer search settles on three layers rather than two,
+    ! and it keeps three until sum(dzmax_u(1:3)). Within that, the bottom two are split
+    ! evenly while the depth is at most dzmax_u(1) + 2*dzmax_u(2), which is the tighter
+    ! of the two upper limits because dzmax_u(3) exceeds dzmax_u(2). The midpoint of
+    ! (sum(dzmax_u(1:2)), dzmax_u(1) + 2*dzmax_u(2)] sits clear of both edges. Three
+    ! layers is below the cap on an NVP column whenever nlevsno is at least four, so it
+    ! is the depth, not the moss slot, that sets the layer count here. (This also wants
+    ! sum(dzmax_u(1:2)) above dzmax_l(1), or the depth would fall in the single-layer
+    ! range instead; SnowHydrologySetControlForTesting's values have that.)
+    !
+    ! Read from the vertical structure, through the same allocate-then-clean call, for
+    ! the reasons overfill_depth gives; its comment also says what the caller has to
+    ! have set up first.
+    real(r8) :: depth
+    real(r8), allocatable :: no_snow(:)  ! [begc:endc]
+
+    allocate(no_snow(bounds%begc:bounds%endc))
+    no_snow(:) = 0._r8
+    call InitSnowLayers(bounds, no_snow)
+    depth = 0.5_r8 * (sum(dzmax_u(1:2)) + (dzmax_u(1) + 2._r8*dzmax_u(2)))
+    call SnowHydrologyClean()
+  end function partial_pack_depth
+
   @Test
   subroutine test_initSnowLayers_depth0_snl(this)
     class(TestSnowHydrology), intent(inout) :: this
@@ -329,5 +393,492 @@ contains
     @assertEqual(zi_moss_top_before, col%zi(c,jbot))
 
   end subroutine test_initSnowLayers_overfillPack_unevenSplit_nvp
+
+  @Test
+  subroutine test_initSnowLayers_emptyPack_stock(this)
+    ! On a stock column given too little snow for a snow pack, InitSnowLayers must leave
+    ! no snow layers and zero the geometry of every snow slot and the soil surface datum,
+    ! whatever those held before.
+    !
+    ! The snow depth is half of dzmin(1); see empty_pack_depth. Every slot the branch
+    ! writes starts out holding a distinct non-zero marker, so a slot the branch skipped
+    ! still holds its marker afterwards; a setup left at zero would be a fixed point of
+    ! the zeroing and could not show it. That includes zi(c,0), which therefore starts
+    ! out deliberately unphysical rather than at the soil surface datum of zero: the
+    ! branch sets it to zero with a line of its own, and only a non-zero starting value
+    ! lets that line be seen. The branch cycles before the node and interface recursion,
+    ! so nothing reads the markers back.
+    !
+    ! Complementary to test_initSnowLayers_emptyPack_nvp: the same snow depth, nlevsno
+    ! and markers, differing only in whether the moss slot is claimed. Here the zeroed
+    ! slots run all the way down to index 0, as they did in the pre-NVP code.
+
+    class(TestSnowHydrology), intent(inout) :: this
+    real(r8), allocatable :: snow_depth(:)  ! [begc:endc]
+    integer, parameter :: my_nlevsno = 5
+    real(r8) :: total_snow_depth
+    ! No snow layers. On a stock column jbot_sno is 0, so the snow slots run from
+    ! first_slot down to index 0 and their interfaces from first_interface to -1.
+    integer, parameter :: snl_empty = 0
+    integer, parameter :: jbot = 0
+    integer, parameter :: first_slot = -my_nlevsno + 1
+    integer, parameter :: first_interface = -my_nlevsno
+    ! Marker scales, one per array so that a value landing in the wrong array is visible
+    ! too. The multiplier runs 2, 3, 4, ... from the top slot down, so dz(c,-4:0) start
+    ! as 2..6, z(c,-4:0) as 20..60 and zi(c,-5:0) as 200..700.
+    real(r8), parameter :: dz_marker_scale = 1._r8
+    real(r8), parameter :: z_marker_scale = 10._r8
+    real(r8), parameter :: zi_marker_scale = 100._r8
+    integer :: c, j
+
+    ! Setup
+    nlevsno = my_nlevsno
+    call SnowHydrologySetControlForTesting()
+    call setup_single_veg_patch(pft_type = 1)
+    ! empty_pack_depth makes a throwaway InitSnowLayers call, which zeroes the snow slots;
+    ! the markers below are laid down after it so that they survive to the real call.
+    total_snow_depth = empty_pack_depth()
+    allocate(snow_depth(bounds%begc:bounds%endc))
+    snow_depth(:) = total_snow_depth
+    c = bounds%begc
+    do j = first_slot, 0
+       col%dz(c,j) = dz_marker_scale * real(j - first_slot + 2, r8)
+       col%z(c,j) = z_marker_scale * real(j - first_slot + 2, r8)
+    end do
+    do j = first_interface, 0
+       col%zi(c,j) = zi_marker_scale * real(j - first_interface + 2, r8)
+    end do
+
+    ! Exercise
+    call InitSnowLayers(bounds, snow_depth)
+
+    ! Verify
+    !
+    @assertEqual(snl_empty, col%snl(c))
+    ! Snow slots zeroed
+    @assertEqual(0._r8, col%dz(c,first_slot:jbot))
+    @assertEqual(0._r8, col%z(c,first_slot:jbot))
+    @assertEqual(0._r8, col%zi(c,first_interface:jbot-1))
+    ! Soil surface datum set to zero from its marker
+    @assertEqual(0._r8, col%zi(c,0))
+
+  end subroutine test_initSnowLayers_emptyPack_stock
+
+  @Test
+  subroutine test_initSnowLayers_emptyPack_nvp(this)
+    ! On an NVP column given too little snow for a snow pack, InitSnowLayers must leave
+    ! no snow layers and zero the geometry of every snow slot and the soil surface datum,
+    ! while leaving the moss geometry untouched.
+    !
+    ! The snow depth is half of dzmin(1); see empty_pack_depth. With the index-0 slot
+    ! claimed, the snow slots are -4:-1 and their interfaces -5:-2, and the zeroing must
+    ! stop there: dz(c,0), z(c,0) and zi(c,-1) hold the moss and come back as they went
+    ! in. Every slot starts out holding a distinct non-zero marker, or the moss geometry
+    ! where the moss sits, so that a slot the branch skipped, or one it should not have
+    ! touched, shows up afterwards. zi(c,0) starts out deliberately unphysical rather
+    ! than at the soil surface datum of zero, because the branch sets it to zero with a
+    ! line of its own and only a non-zero starting value lets that line be seen; it is
+    ! inconsistent with the moss top at zi(c,-1) as a result, which is harmless because
+    ! the branch cycles before the node and interface recursion and nothing reads either
+    ! back. The moss geometry here is the physical one, node at the layer midpoint: the
+    ! branch never computes a node, so there is no recursion for it to be a fixed point
+    ! of.
+    !
+    ! Complementary to test_initSnowLayers_emptyPack_stock: the same snow depth, nlevsno
+    ! and markers, differing only in whether the moss slot is claimed.
+
+    class(TestSnowHydrology), intent(inout) :: this
+    real(r8), allocatable :: snow_depth(:)  ! [begc:endc]
+    ! Chosen to match no snow thickness or depth any test of this file's empty-pack,
+    ! partial-pack or single-layer cases lays down (0.005, 0.02, 0.0375 and 0.095 at
+    ! SnowHydrologySetControlForTesting's vertical structure), so that a snow value
+    ! written into the moss slot changes the moss thickness instead of reproducing it.
+    real(r8), parameter :: dz_nvp = 0.045_r8
+    integer, parameter :: my_nlevsno = 5
+    real(r8) :: total_snow_depth
+    ! No snow layers. On an NVP column jbot_sno is -1, so the snow slots run from
+    ! first_slot down to -1 and their interfaces from first_interface to -2, with the
+    ! moss at index 0 below them.
+    integer, parameter :: snl_empty = 0
+    integer, parameter :: jbot = -1
+    integer, parameter :: first_slot = -my_nlevsno + 1
+    integer, parameter :: first_interface = -my_nlevsno
+    integer, parameter :: j_moss = 0
+    ! Marker scales, one per array so that a value landing in the wrong array is visible
+    ! too. The multiplier runs 2, 3, 4, ... from the top slot down, so dz(c,-4:-1) start
+    ! as 2..5, z(c,-4:-1) as 20..50 and zi(c,-5:-2) as 200..500, with zi(c,0) at 700.
+    ! The markers at dz(c,0), z(c,0) and zi(c,-1) are overwritten by the moss geometry.
+    real(r8), parameter :: dz_marker_scale = 1._r8
+    real(r8), parameter :: z_marker_scale = 10._r8
+    real(r8), parameter :: zi_marker_scale = 100._r8
+    ! The moss geometry as this test's setup left it; see the overfillPack_unevenSplit_nvp
+    ! test for why it is read back out of the arrays rather than restated.
+    real(r8) :: dz_moss_before, z_moss_before, zi_moss_top_before
+    integer :: c, j
+
+    ! Setup
+    nlevsno = my_nlevsno
+    call SnowHydrologySetControlForTesting()
+    call setup_single_veg_patch(pft_type = 1)
+    ! empty_pack_depth makes a throwaway InitSnowLayers call, which zeroes the snow slots;
+    ! the markers below are laid down after it so that they survive to the real call.
+    total_snow_depth = empty_pack_depth()
+    allocate(snow_depth(bounds%begc:bounds%endc))
+    snow_depth(:) = total_snow_depth
+    c = bounds%begc
+    do j = first_slot, 0
+       col%dz(c,j) = dz_marker_scale * real(j - first_slot + 2, r8)
+       col%z(c,j) = z_marker_scale * real(j - first_slot + 2, r8)
+    end do
+    do j = first_interface, 0
+       col%zi(c,j) = zi_marker_scale * real(j - first_interface + 2, r8)
+    end do
+
+    ! Stand in for NVPLayerInit, which is what claims the slot in a real run
+    col%jbot_sno(c) = -1
+    col%dz(c,j_moss) = dz_nvp
+    col%z(c,j_moss) = -0.5_r8 * dz_nvp
+    col%zi(c,jbot) = -dz_nvp
+    dz_moss_before = col%dz(c,j_moss)
+    z_moss_before = col%z(c,j_moss)
+    zi_moss_top_before = col%zi(c,jbot)
+
+    ! Exercise
+    call InitSnowLayers(bounds, snow_depth)
+
+    ! Verify
+    !
+    @assertEqual(snl_empty, col%snl(c))
+    ! Moss geometry survived. Checked ahead of the snow geometry, so that a clobbered
+    ! moss is reported as such rather than as the knock-on error in the pack above it.
+    @assertEqual(dz_moss_before, col%dz(c,j_moss))
+    @assertEqual(z_moss_before, col%z(c,j_moss))
+    @assertEqual(zi_moss_top_before, col%zi(c,jbot))
+    ! Snow slots zeroed
+    @assertEqual(0._r8, col%dz(c,first_slot:jbot))
+    @assertEqual(0._r8, col%z(c,first_slot:jbot))
+    @assertEqual(0._r8, col%zi(c,first_interface:jbot-1))
+    ! Soil surface datum set to zero from its marker
+    @assertEqual(0._r8, col%zi(c,0))
+
+  end subroutine test_initSnowLayers_emptyPack_nvp
+
+  @Test
+  subroutine test_initSnowLayers_partialPack_evenSplit_stock(this)
+    ! On a stock column given snow that needs more than two layers but too few to fill
+    ! the pack, InitSnowLayers must split the bottom two layers evenly and lay the pack
+    ! down on the soil surface with geometry that closes.
+    !
+    ! The snow depth is the midpoint of the window in which InitSnowLayers settles on
+    ! three layers and splits the bottom two evenly; see partial_pack_depth. At
+    ! SnowHydrologySetControlForTesting's vertical structure that lays down 0.02 at slot
+    ! -2 and 0.0375 at each of -1 and 0. The layer count is set by the depth, well short
+    ! of the cap. The thicknesses are asserted from dzmax_u rather than as literals, for
+    ! the reason overfillPack_unevenSplit_stock gives.
+    !
+    ! Complementary to test_initSnowLayers_partialPack_evenSplit_nvp: the same snow
+    ! depth and the same nlevsno, differing only in whether the moss slot is claimed.
+
+    class(TestSnowHydrology), intent(inout) :: this
+    real(r8), allocatable :: snow_depth(:)  ! [begc:endc]
+    integer, parameter :: my_nlevsno = 5
+    real(r8) :: total_snow_depth
+    ! The three layers partial_pack_depth lays down. On a stock column jbot_sno is 0,
+    ! so the pack's top slot is snl+1 and its bottom slot is at the soil surface.
+    integer, parameter :: snl_partial = -3
+    integer, parameter :: jtop = snl_partial + 1
+    integer, parameter :: jbot = 0
+    ! The soil surface datum as this test's setup left it.
+    real(r8) :: zi_soil_before
+    ! What each of the bottom two layers should hold: the snow left over once the top
+    ! layer has taken dzmax_u(1), halved.
+    real(r8) :: even_split_dz
+    real(r8), parameter :: tol = 1.e-13_r8
+    integer :: c, j
+
+    ! Setup
+    nlevsno = my_nlevsno
+    call SnowHydrologySetControlForTesting()
+    call setup_single_veg_patch(pft_type = 1)
+    ! partial_pack_depth makes a throwaway InitSnowLayers call; the soil surface datum is
+    ! still assigned explicitly below, for the reason overfillPack_unevenSplit_stock gives.
+    total_snow_depth = partial_pack_depth()
+    allocate(snow_depth(bounds%begc:bounds%endc))
+    snow_depth(:) = total_snow_depth
+    c = bounds%begc
+    col%zi(c,0) = 0._r8 ! Normally initialized elsewhere (initVerticalMod)
+    zi_soil_before = col%zi(c,0)
+
+    ! Exercise
+    call InitSnowLayers(bounds, snow_depth)
+
+    ! Verify
+    !
+    @assertEqual(snl_partial, col%snl(c))
+    ! Soil surface datum untouched
+    @assertEqual(zi_soil_before, col%zi(c,0))
+    ! Top layer as thick as a layer with layers beneath may be
+    @assertEqual(dzmax_u(1), col%dz(c,jtop), tolerance=tol)
+    ! Bottom two layers split the rest evenly
+    even_split_dz = (total_snow_depth - dzmax_u(1)) / 2._r8
+    @assertEqual(even_split_dz, col%dz(c,jbot-1), tolerance=tol)
+    @assertEqual(even_split_dz, col%dz(c,jbot), tolerance=tol)
+    ! Snow thickness conserved
+    @assertEqual(total_snow_depth, sum(col%dz(c,jtop:jbot)), tolerance=tol)
+    ! Top of the pack sits a full snow depth above the soil surface
+    @assertEqual(-total_snow_depth, col%zi(c,jtop-1), tolerance=tol)
+
+    ! Node at layer midpoint, and the interface recursion closes
+    do j = jtop, jbot
+       @assertEqual(col%zi(c,j) - 0.5_r8*col%dz(c,j), col%z(c,j), tolerance=tol)
+       @assertEqual(col%zi(c,j) - col%dz(c,j), col%zi(c,j-1), tolerance=tol)
+    end do
+
+  end subroutine test_initSnowLayers_partialPack_evenSplit_stock
+
+  @Test
+  subroutine test_initSnowLayers_partialPack_evenSplit_nvp(this)
+    ! On an NVP column given snow that needs more than two layers but too few to fill
+    ! the pack, InitSnowLayers must split the bottom two layers evenly, rest the pack on
+    ! top of the moss rather than on the soil surface, and leave the moss geometry
+    ! untouched.
+    !
+    ! The snow depth is the midpoint of the window in which InitSnowLayers settles on
+    ! three layers and splits the bottom two evenly; see partial_pack_depth. At
+    ! SnowHydrologySetControlForTesting's vertical structure that lays down 0.02 at slot
+    ! -3 and 0.0375 at each of -2 and -1, with the moss at 0. Three layers is short of
+    ! the nlevsno-1 an NVP column may hold, so this is the case where the depth rather
+    ! than the moss slot sets the layer count.
+    !
+    ! The moss node is deliberately not the midpoint of the moss layer, for the reason
+    ! moss_node_fraction gives in overfillPack_unevenSplit_nvp: a recursion that began
+    ! at slot 0 rather than at jbot would overwrite it with the midpoint.
+    !
+    ! Complementary to test_initSnowLayers_partialPack_evenSplit_stock: the same snow
+    ! depth and the same nlevsno, differing only in whether the moss slot is claimed.
+
+    class(TestSnowHydrology), intent(inout) :: this
+    real(r8), allocatable :: snow_depth(:)  ! [begc:endc]
+    ! Chosen to match no snow thickness or depth any test of this file's empty-pack,
+    ! partial-pack or single-layer cases lays down (0.005, 0.02, 0.0375 and 0.095 at
+    ! SnowHydrologySetControlForTesting's vertical structure), so that a snow value
+    ! written into the moss slot changes the moss thickness instead of reproducing it.
+    real(r8), parameter :: dz_nvp = 0.045_r8
+    ! How far below the top of the moss its node sits, as a fraction of dz_nvp;
+    ! deliberately not one half. See the same constant in overfillPack_unevenSplit_nvp.
+    real(r8), parameter :: moss_node_fraction = 0.25_r8
+    integer, parameter :: my_nlevsno = 5
+    real(r8) :: total_snow_depth
+    ! The three layers partial_pack_depth lays down. On an NVP column jbot_sno is -1,
+    ! so jtop is snl itself and the pack's bottom slot is -1, with the moss just below
+    ! it at 0.
+    integer, parameter :: snl_partial = -3
+    integer, parameter :: jtop = snl_partial
+    integer, parameter :: jbot = -1
+    integer, parameter :: j_moss = 0
+    ! The moss geometry and the soil surface datum as this test's setup left them; see
+    ! overfillPack_unevenSplit_nvp for why they are read back rather than restated.
+    real(r8) :: dz_moss_before, z_moss_before, zi_moss_top_before, zi_soil_before
+    ! What each of the bottom two layers should hold: the snow left over once the top
+    ! layer has taken dzmax_u(1), halved.
+    real(r8) :: even_split_dz
+    real(r8), parameter :: tol = 1.e-13_r8
+    integer :: c, j
+
+    ! Setup
+    nlevsno = my_nlevsno
+    call SnowHydrologySetControlForTesting()
+    call setup_single_veg_patch(pft_type = 1)
+    ! partial_pack_depth makes a throwaway InitSnowLayers call; the soil surface datum is
+    ! still assigned explicitly below, for the reason overfillPack_unevenSplit_stock gives.
+    total_snow_depth = partial_pack_depth()
+    allocate(snow_depth(bounds%begc:bounds%endc))
+    snow_depth(:) = total_snow_depth
+    c = bounds%begc
+    col%zi(c,0) = 0._r8 ! Normally initialized elsewhere (initVerticalMod)
+
+    ! Stand in for NVPLayerInit, which is what claims the slot in a real run
+    col%jbot_sno(c) = -1
+    col%dz(c,j_moss) = dz_nvp
+    ! Deliberately not the midpoint of the moss layer; see moss_node_fraction.
+    col%z(c,j_moss) = -moss_node_fraction * dz_nvp
+    col%zi(c,jbot) = -dz_nvp
+    dz_moss_before = col%dz(c,j_moss)
+    z_moss_before = col%z(c,j_moss)
+    zi_moss_top_before = col%zi(c,jbot)
+    zi_soil_before = col%zi(c,0)
+
+    ! Exercise
+    call InitSnowLayers(bounds, snow_depth)
+
+    ! Verify
+    !
+    @assertEqual(snl_partial, col%snl(c))
+    ! Soil surface datum untouched
+    @assertEqual(zi_soil_before, col%zi(c,0))
+    ! Moss geometry survived. Checked ahead of the snow geometry, so that a clobbered
+    ! moss is reported as such rather than as the knock-on error in the pack above it.
+    @assertEqual(dz_moss_before, col%dz(c,j_moss))
+    @assertEqual(z_moss_before, col%z(c,j_moss))
+    @assertEqual(zi_moss_top_before, col%zi(c,jbot))
+    ! Top layer as thick as a layer with layers beneath may be
+    @assertEqual(dzmax_u(1), col%dz(c,jtop), tolerance=tol)
+    ! Bottom two layers split the rest evenly
+    even_split_dz = (total_snow_depth - dzmax_u(1)) / 2._r8
+    @assertEqual(even_split_dz, col%dz(c,jbot-1), tolerance=tol)
+    @assertEqual(even_split_dz, col%dz(c,jbot), tolerance=tol)
+    ! Snow thickness conserved
+    @assertEqual(total_snow_depth, sum(col%dz(c,jtop:jbot)), tolerance=tol)
+    ! Top of the pack sits a full snow depth above the moss
+    @assertEqual(-(dz_nvp + total_snow_depth), col%zi(c,jtop-1), tolerance=tol)
+
+    ! Node at layer midpoint, and the interface recursion closes
+    do j = jtop, jbot
+       @assertEqual(col%zi(c,j) - 0.5_r8*col%dz(c,j), col%z(c,j), tolerance=tol)
+       @assertEqual(col%zi(c,j) - col%dz(c,j), col%zi(c,j-1), tolerance=tol)
+    end do
+
+  end subroutine test_initSnowLayers_partialPack_evenSplit_nvp
+
+  @Test
+  subroutine test_initSnowLayers_singleLayer_stock(this)
+    ! On a stock column given snow enough for one layer but not two, InitSnowLayers must
+    ! lay all of it down as a single layer on the soil surface with geometry that closes.
+    !
+    ! The snow depth is the midpoint of the range dzmin(1) to dzmax_l(1); see
+    ! single_layer_depth.
+    !
+    ! Complementary to test_initSnowLayers_singleLayer_nvp: the same snow depth and the
+    ! same nlevsno, differing only in whether the moss slot is claimed.
+
+    class(TestSnowHydrology), intent(inout) :: this
+    real(r8), allocatable :: snow_depth(:)  ! [begc:endc]
+    integer, parameter :: my_nlevsno = 5
+    real(r8) :: total_snow_depth
+    ! One snow layer. On a stock column jbot_sno is 0, so the layer sits at the soil
+    ! surface, in slot 0.
+    integer, parameter :: snl_single = -1
+    integer, parameter :: jbot = 0
+    ! The soil surface datum as this test's setup left it.
+    real(r8) :: zi_soil_before
+    real(r8), parameter :: tol = 1.e-13_r8
+    integer :: c
+
+    ! Setup
+    nlevsno = my_nlevsno
+    call SnowHydrologySetControlForTesting()
+    call setup_single_veg_patch(pft_type = 1)
+    ! single_layer_depth makes a throwaway InitSnowLayers call; the soil surface datum is
+    ! still assigned explicitly below, for the reason overfillPack_unevenSplit_stock gives.
+    total_snow_depth = single_layer_depth()
+    allocate(snow_depth(bounds%begc:bounds%endc))
+    snow_depth(:) = total_snow_depth
+    c = bounds%begc
+    col%zi(c,0) = 0._r8 ! Normally initialized elsewhere (initVerticalMod)
+    zi_soil_before = col%zi(c,0)
+
+    ! Exercise
+    call InitSnowLayers(bounds, snow_depth)
+
+    ! Verify
+    !
+    @assertEqual(snl_single, col%snl(c))
+    ! Soil surface datum untouched
+    @assertEqual(zi_soil_before, col%zi(c,0))
+    ! All the snow in the one layer
+    @assertEqual(total_snow_depth, col%dz(c,jbot))
+    ! Node at layer midpoint, and the interface recursion closes
+    @assertEqual(col%zi(c,jbot) - 0.5_r8*col%dz(c,jbot), col%z(c,jbot), tolerance=tol)
+    @assertEqual(col%zi(c,jbot) - col%dz(c,jbot), col%zi(c,jbot-1), tolerance=tol)
+    ! Top of the pack sits a full snow depth above the soil surface
+    @assertEqual(-total_snow_depth, col%zi(c,jbot-1), tolerance=tol)
+
+  end subroutine test_initSnowLayers_singleLayer_stock
+
+  @Test
+  subroutine test_initSnowLayers_singleLayer_nvp(this)
+    ! On an NVP column given snow enough for one layer but not two, InitSnowLayers must
+    ! lay all of it down as a single layer on top of the moss rather than in the moss
+    ! slot, and leave the moss geometry untouched.
+    !
+    ! The snow depth is the midpoint of the range dzmin(1) to dzmax_l(1); see
+    ! single_layer_depth. The one layer belongs at slot -1; written to slot 0 instead,
+    ! the snow depth would replace the moss thickness.
+    !
+    ! The moss node is deliberately not the midpoint of the moss layer, for the reason
+    ! moss_node_fraction gives in overfillPack_unevenSplit_nvp: a recursion that began
+    ! at slot 0 rather than at jbot would overwrite it with the midpoint.
+    !
+    ! Complementary to test_initSnowLayers_singleLayer_stock: the same snow depth and the
+    ! same nlevsno, differing only in whether the moss slot is claimed.
+
+    class(TestSnowHydrology), intent(inout) :: this
+    real(r8), allocatable :: snow_depth(:)  ! [begc:endc]
+    ! Chosen to match no snow thickness or depth any test of this file's empty-pack,
+    ! partial-pack or single-layer cases lays down (0.005, 0.02, 0.0375 and 0.095 at
+    ! SnowHydrologySetControlForTesting's vertical structure), so that a snow value
+    ! written into the moss slot changes the moss thickness instead of reproducing it.
+    real(r8), parameter :: dz_nvp = 0.045_r8
+    ! How far below the top of the moss its node sits, as a fraction of dz_nvp;
+    ! deliberately not one half. See the same constant in overfillPack_unevenSplit_nvp.
+    real(r8), parameter :: moss_node_fraction = 0.25_r8
+    integer, parameter :: my_nlevsno = 5
+    real(r8) :: total_snow_depth
+    ! One snow layer. On an NVP column jbot_sno is -1, so the layer sits in slot -1,
+    ! with the moss just below it at 0.
+    integer, parameter :: snl_single = -1
+    integer, parameter :: jbot = -1
+    integer, parameter :: j_moss = 0
+    ! The moss geometry and the soil surface datum as this test's setup left them; see
+    ! overfillPack_unevenSplit_nvp for why they are read back rather than restated.
+    real(r8) :: dz_moss_before, z_moss_before, zi_moss_top_before, zi_soil_before
+    real(r8), parameter :: tol = 1.e-13_r8
+    integer :: c
+
+    ! Setup
+    nlevsno = my_nlevsno
+    call SnowHydrologySetControlForTesting()
+    call setup_single_veg_patch(pft_type = 1)
+    ! single_layer_depth makes a throwaway InitSnowLayers call; the soil surface datum is
+    ! still assigned explicitly below, for the reason overfillPack_unevenSplit_stock gives.
+    total_snow_depth = single_layer_depth()
+    allocate(snow_depth(bounds%begc:bounds%endc))
+    snow_depth(:) = total_snow_depth
+    c = bounds%begc
+    col%zi(c,0) = 0._r8 ! Normally initialized elsewhere (initVerticalMod)
+
+    ! Stand in for NVPLayerInit, which is what claims the slot in a real run
+    col%jbot_sno(c) = -1
+    col%dz(c,j_moss) = dz_nvp
+    ! Deliberately not the midpoint of the moss layer; see moss_node_fraction.
+    col%z(c,j_moss) = -moss_node_fraction * dz_nvp
+    col%zi(c,jbot) = -dz_nvp
+    dz_moss_before = col%dz(c,j_moss)
+    z_moss_before = col%z(c,j_moss)
+    zi_moss_top_before = col%zi(c,jbot)
+    zi_soil_before = col%zi(c,0)
+
+    ! Exercise
+    call InitSnowLayers(bounds, snow_depth)
+
+    ! Verify
+    !
+    @assertEqual(snl_single, col%snl(c))
+    ! Soil surface datum untouched
+    @assertEqual(zi_soil_before, col%zi(c,0))
+    ! Moss geometry survived. Checked ahead of the snow geometry, so that a clobbered
+    ! moss is reported as such rather than as the knock-on error in the pack above it.
+    @assertEqual(dz_moss_before, col%dz(c,j_moss))
+    @assertEqual(z_moss_before, col%z(c,j_moss))
+    @assertEqual(zi_moss_top_before, col%zi(c,jbot))
+    ! All the snow in the one layer
+    @assertEqual(total_snow_depth, col%dz(c,jbot))
+    ! Node at layer midpoint, and the interface recursion closes
+    @assertEqual(col%zi(c,jbot) - 0.5_r8*col%dz(c,jbot), col%z(c,jbot), tolerance=tol)
+    @assertEqual(col%zi(c,jbot) - col%dz(c,jbot), col%zi(c,jbot-1), tolerance=tol)
+    ! Top of the pack sits a full snow depth above the moss
+    @assertEqual(-(dz_nvp + total_snow_depth), col%zi(c,jbot-1), tolerance=tol)
+
+  end subroutine test_initSnowLayers_singleLayer_nvp
 
 end module test_SnowHydrology_initSnowLayers
