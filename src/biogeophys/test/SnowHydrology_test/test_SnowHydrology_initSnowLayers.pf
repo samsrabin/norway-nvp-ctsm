@@ -299,7 +299,11 @@ contains
 
     class(TestSnowHydrology), intent(inout) :: this
     real(r8), allocatable :: snow_depth(:)  ! [begc:endc]
-    real(r8), parameter :: dz_nvp = 0.02_r8
+    ! Chosen to match no snow thickness or depth this test lays down (0.02, 0.05, 0.11
+    ! and 1.05 per layer, 1.23 in all, at SnowHydrologySetControlForTesting's vertical
+    ! structure), so that a snow value written into the moss slot changes the moss
+    ! thickness instead of reproducing it.
+    real(r8), parameter :: dz_nvp = 0.045_r8
     ! How far below the top of the moss its node sits, as a fraction of dz_nvp. A real
     ! moss layer would put its node at the layer midpoint; this one deliberately does not,
     ! and that is the only reason the recursion's starting slot can be tested at all. The
