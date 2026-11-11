@@ -114,7 +114,11 @@ contains
   function single_layer_depth() result(depth)
     ! A snow depth InitSnowLayers lays down as a single layer: between dzmin(1) and
     ! dzmax_l(1), the thinnest a lone layer may be and the thickest it may grow before a
-    ! second is needed. The midpoint of that range sits clear of both edges.
+    ! second is needed. Two thirds of the way up that range rather than the midpoint,
+    ! which at SnowHydrologySetControlForTesting's values is exactly dzmax_u(1): a single
+    ! layer wrongly given dzmax_u(1) would then still hold the whole snow depth. Two
+    ! thirds lands on no threshold of the vertical structure and sits clear of both
+    ! edges.
     !
     ! Read from the vertical structure, through the same allocate-then-clean call, for
     ! the reasons overfill_depth gives; its comment also says what the caller has to
@@ -125,7 +129,7 @@ contains
     allocate(no_snow(bounds%begc:bounds%endc))
     no_snow(:) = 0._r8
     call InitSnowLayers(bounds, no_snow)
-    depth = 0.5_r8 * (dzmin(1) + dzmax_l(1))
+    depth = (dzmin(1) + 2._r8*dzmax_l(1)) / 3._r8
     call SnowHydrologyClean()
   end function single_layer_depth
 
@@ -401,13 +405,14 @@ contains
     ! whatever those held before.
     !
     ! The snow depth is half of dzmin(1); see empty_pack_depth. Every slot the branch
-    ! writes starts out holding a distinct non-zero marker, so a slot the branch skipped
-    ! still holds its marker afterwards; a setup left at zero would be a fixed point of
-    ! the zeroing and could not show it. That includes zi(c,0), which therefore starts
-    ! out deliberately unphysical rather than at the soil surface datum of zero: the
-    ! branch sets it to zero with a line of its own, and only a non-zero starting value
-    ! lets that line be seen. The branch cycles before the node and interface recursion,
-    ! so nothing reads the markers back.
+    ! writes starts out holding a distinct non-zero marker. InitSnowLayers prefills the
+    ! snow slots with spval before the branch runs, so a snow slot the zeroing skipped
+    ! reads back as spval rather than as its marker; the marker that matters is the one
+    ! at zi(c,0), which the prefill does not reach. zi(c,0) therefore starts out
+    ! deliberately unphysical rather than at the soil surface datum of zero: the branch
+    ! sets it to zero with a line of its own, and only a non-zero starting value lets
+    ! that line be seen. The branch cycles before the node and interface recursion, so
+    ! nothing reads the markers back.
     !
     ! Complementary to test_initSnowLayers_emptyPack_nvp: the same snow depth, nlevsno
     ! and markers, differing only in whether the moss slot is claimed. Here the zeroed
@@ -474,10 +479,12 @@ contains
     ! claimed, the snow slots are -4:-1 and their interfaces -5:-2, and the zeroing must
     ! stop there: dz(c,0), z(c,0) and zi(c,-1) hold the moss and come back as they went
     ! in. Every slot starts out holding a distinct non-zero marker, or the moss geometry
-    ! where the moss sits, so that a slot the branch skipped, or one it should not have
-    ! touched, shows up afterwards. zi(c,0) starts out deliberately unphysical rather
-    ! than at the soil surface datum of zero, because the branch sets it to zero with a
-    ! line of its own and only a non-zero starting value lets that line be seen; it is
+    ! where the moss sits. InitSnowLayers prefills the snow slots with spval before the
+    ! branch runs, so a snow slot the zeroing skipped reads back as spval rather than as
+    ! its marker; the marker that matters is the one at zi(c,0), which the prefill does
+    ! not reach. zi(c,0) starts out deliberately unphysical rather than at the soil
+    ! surface datum of zero, because the branch sets it to zero with a line of its own
+    ! and only a non-zero starting value lets that line be seen; it is
     ! inconsistent with the moss top at zi(c,-1) as a result, which is harmless because
     ! the branch cycles before the node and interface recursion and nothing reads either
     ! back. The moss geometry here is the physical one, node at the layer midpoint: the
@@ -490,7 +497,7 @@ contains
     class(TestSnowHydrology), intent(inout) :: this
     real(r8), allocatable :: snow_depth(:)  ! [begc:endc]
     ! Chosen to match no snow thickness or depth any test of this file's empty-pack,
-    ! partial-pack or single-layer cases lays down (0.005, 0.02, 0.0375 and 0.095 at
+    ! partial-pack or single-layer cases lays down (0.005, 0.02, 0.0233..., 0.0375 and 0.095 at
     ! SnowHydrologySetControlForTesting's vertical structure), so that a snow value
     ! written into the moss slot changes the moss thickness instead of reproducing it.
     real(r8), parameter :: dz_nvp = 0.045_r8
@@ -660,7 +667,7 @@ contains
     class(TestSnowHydrology), intent(inout) :: this
     real(r8), allocatable :: snow_depth(:)  ! [begc:endc]
     ! Chosen to match no snow thickness or depth any test of this file's empty-pack,
-    ! partial-pack or single-layer cases lays down (0.005, 0.02, 0.0375 and 0.095 at
+    ! partial-pack or single-layer cases lays down (0.005, 0.02, 0.0233..., 0.0375 and 0.095 at
     ! SnowHydrologySetControlForTesting's vertical structure), so that a snow value
     ! written into the moss slot changes the moss thickness instead of reproducing it.
     real(r8), parameter :: dz_nvp = 0.045_r8
@@ -745,7 +752,7 @@ contains
     ! On a stock column given snow enough for one layer but not two, InitSnowLayers must
     ! lay all of it down as a single layer on the soil surface with geometry that closes.
     !
-    ! The snow depth is the midpoint of the range dzmin(1) to dzmax_l(1); see
+    ! The snow depth is two thirds of the way from dzmin(1) to dzmax_l(1); see
     ! single_layer_depth.
     !
     ! Complementary to test_initSnowLayers_singleLayer_nvp: the same snow depth and the
@@ -801,7 +808,7 @@ contains
     ! lay all of it down as a single layer on top of the moss rather than in the moss
     ! slot, and leave the moss geometry untouched.
     !
-    ! The snow depth is the midpoint of the range dzmin(1) to dzmax_l(1); see
+    ! The snow depth is two thirds of the way from dzmin(1) to dzmax_l(1); see
     ! single_layer_depth. The one layer belongs at slot -1; written to slot 0 instead,
     ! the snow depth would replace the moss thickness.
     !
@@ -815,7 +822,7 @@ contains
     class(TestSnowHydrology), intent(inout) :: this
     real(r8), allocatable :: snow_depth(:)  ! [begc:endc]
     ! Chosen to match no snow thickness or depth any test of this file's empty-pack,
-    ! partial-pack or single-layer cases lays down (0.005, 0.02, 0.0375 and 0.095 at
+    ! partial-pack or single-layer cases lays down (0.005, 0.02, 0.0233..., 0.0375 and 0.095 at
     ! SnowHydrologySetControlForTesting's vertical structure), so that a snow value
     ! written into the moss slot changes the moss thickness instead of reproducing it.
     real(r8), parameter :: dz_nvp = 0.045_r8
