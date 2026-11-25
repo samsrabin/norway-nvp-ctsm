@@ -142,7 +142,7 @@ contains
     ! evenly while the depth is at most dzmax_u(1) + 2*dzmax_u(2), which is the tighter
     ! of the two upper limits because dzmax_u(3) exceeds dzmax_u(2). The midpoint of
     ! (sum(dzmax_u(1:2)), dzmax_u(1) + 2*dzmax_u(2)] sits clear of both edges. Three
-    ! layers is below the cap on an NVP column whenever nlevsno is at least four, so it
+    ! layers is below the cap on an NVP column whenever nlevsno is at least five, so it
     ! is the depth, not the moss slot, that sets the layer count here. (This also wants
     ! sum(dzmax_u(1:2)) above dzmax_l(1), or the depth would fall in the single-layer
     ! range instead; SnowHydrologySetControlForTesting's values have that.)
