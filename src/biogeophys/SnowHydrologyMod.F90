@@ -3153,8 +3153,10 @@ contains
           z(c,-nlevsno+1:jbot   ) = 0._r8
           zi(c,-nlevsno+0:jbot-1) = 0._r8
           ! zi(c,0) is the soil surface datum and is 0 on every column, with or
-          ! without the NVP slot; the slice above stops short of it when jbot is
-          ! -1, so set it explicitly.
+          ! without the NVP slot. The slice above stops at jbot-1, short of
+          ! zi(c,0) on every column, stock ones included (where the pre-NVP
+          ! slice ran through 0), so this line is what keeps the stock path
+          ! bit-for-bit; it must stay unconditional.
           zi(c,0)                 = 0._r8
           cycle
        end if
